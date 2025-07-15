@@ -1,5 +1,133 @@
 # EIP-7702 dApp
 
+A React-based decentralized application that demonstrates EIP-7702 (Set EOA account code) functionality with MetaMask integration using the official MetaMask Delegation Toolkit.
+
+## Features
+
+- ✅ MetaMask wallet connection with EIP-7702 support
+- ✅ Automatic delegation contract setup (MetaMask's EIP7702StatelessDeleGator)
+- ✅ Batch transaction builder with native token support
+- ✅ Real EIP-7702 transaction execution
+- ✅ Smart account creation and management
+- ✅ User operation execution through bundler
+
+## Prerequisites
+
+- Node.js (version 16 or higher)
+- npm or yarn
+- MetaMask browser extension (latest version with EIP-7702 support)
+- Access to Ethereum Sepolia testnet
+- A bundler service URL (for user operations)
+
+## Installation
+
+1. Clone or create the project directory
+2. Install dependencies:
+
+```bash
+npm install
+# or
+yarn install
+```
+
+3. **Important**: Update the bundler URL in `src/App.js`:
+```javascript
+const viemBundlerClient = createBundlerClient({
+  client: viemPublicClient,
+  transport: http("https://your-bundler-url.com"), // Replace with your bundler
+});
+```
+
+## Usage
+
+1. Start the development server:
+
+```bash
+npm start
+# or
+yarn start
+```
+
+2. Open your browser and navigate to `http://localhost:3000`
+
+3. Connect your MetaMask wallet (ensure you're on Sepolia testnet)
+
+4. The delegation contract will be automatically set to MetaMask's EIP7702StatelessDeleGator
+
+5. Add batch transactions with:
+   - Target address
+   - Value in ETH
+   - Calldata
+
+6. Create the EIP-7702 delegation (upgrades your EOA to smart account)
+
+7. Execute batch transactions through the smart account
+
+## How It Works
+
+### EIP-7702 Implementation
+
+This application uses MetaMask's official Delegation Toolkit to:
+
+1. **Create Authorization**: Sign an EIP-7702 authorization to delegate your EOA to a smart contract
+2. **Send Delegation Transaction**: Execute the authorization with a Type-4 transaction
+3. **Upgrade to Smart Account**: Your EOA now has smart contract capabilities
+4. **Execute User Operations**: Batch transactions through the ERC-4337 bundler
+
+### MetaMask Delegation Toolkit
+
+The app leverages:
+- `@metamask/delegation-toolkit` for smart account creation
+- `viem` for blockchain interactions
+- MetaMask's EIP7702StatelessDeleGator contract
+- ERC-4337 bundler for user operations
+
+### Transaction Flow
+
+1. **Authorization**: Create and sign EIP-7702 authorization
+2. **Delegation**: Send transaction to set contract code for your EOA
+3. **Smart Account**: Your EOA becomes a smart account
+4. **Batch Execution**: Execute multiple transactions atomically
+
+## Configuration
+
+### Bundler Setup
+
+You'll need a bundler service that supports ERC-4337 user operations. Popular options include:
+- Pimlico
+- Alchemy
+- Stackup
+- Biconomy
+
+Replace the bundler URL in the code:
+```javascript
+transport: http("https://your-bundler-endpoint.com")
+```
+
+### Network Configuration
+
+The app is configured for Sepolia testnet. To use other networks:
+1. Update the chain import in `src/App.js`
+2. Ensure the network supports EIP-7702
+3. Update the delegation environment
+
+## Delegation Contract
+
+The app uses MetaMask's EIP7702StatelessDeleGator at address:
+`0xBDBA7F921f8C8AFF014749Fc17324e832291bfB0` (Sepolia)
+
+This contract provides:
+- Stateless delegation (no storage of signer data)
+- Batch transaction execution
+- ERC-4337 compatibility
+- Security-focused design
+
+## Value Field Support
+
+Each batch transaction now supports:
+- **Address**: Target contract or EOA
+- **Value**: Amount of ETH to send (e.g., "0.1" for 0.1# EIP-7702 dApp
+
 A React-based decentralized application that demonstrates EIP-7702 (Set EOA account code) functionality with MetaMask integration.
 
 ## Features

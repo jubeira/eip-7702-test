@@ -1,16 +1,37 @@
 import React, { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
+import { createBundlerClient } from "viem/account-abstraction";
+import { 
+  createPublicClient, 
+  createWalletClient, 
+  http, 
+  parseEther,
+  zeroAddress 
+} from 'viem';
+import { sepolia } from 'viem/chains';
+import { custom } from 'viem';
+import {
+  Implementation,
+  toMetaMaskSmartAccount,
+  getDeleGatorEnvironment,
+} from '@metamask/delegation-toolkit';
 
 const App = () => {
   const [account, setAccount] = useState(null);
   const [provider, setProvider] = useState(null);
   const [signer, setSigner] = useState(null);
+  const [publicClient, setPublicClient] = useState(null);
+  const [walletClient, setWalletClient] = useState(null);
+  const [bundlerClient, setBundlerClient] = useState(null);
+  const [smartAccount, setSmartAccount] = useState(null);
   const [delegationContract, setDelegationContract] = useState('');
   const [batchTransactions, setBatchTransactions] = useState([]);
   const [newTxAddress, setNewTxAddress] = useState('');
   const [newTxCalldata, setNewTxCalldata] = useState('');
+  const [newTxValue, setNewTxValue] = useState('0');
   const [status, setStatus] = useState({ type: '', message: '' });
   const [isLoading, setIsLoading] = useState(false);
+  const [isDelegated, setIsDelegated] = useState(false);
 
   // Check if MetaMask is installed
   const isMetaMaskInstalled = () => {
@@ -33,10 +54,34 @@ const App = () => {
       const web3Provider = new ethers.BrowserProvider(window.ethereum);
       const web3Signer = await web3Provider.getSigner();
       
+      // Set up Viem clients
+      const viemPublicClient = createPublicClient({
+        chain: sepolia,
+        transport: http(),
+      });
+
+      const viemWalletClient = createWalletClient({
+        chain: sepolia,
+        transport: custom(window.ethereum),
+      });
+
+      // Set up bundler client (you'll need to replace with your bundler URL)
+      const viemBundlerClient = createBundlerClient({
+        client: viemPublicClient,
+        transport: http("https://sepolia.bundler.example.com"), // Replace with actual bundler
+      });
+      
       setProvider(web3Provider);
       setSigner(web3Signer);
+      setPublicClient(viemPublicClient);
+      setWalletClient(viemWalletClient);
+      setBundlerClient(viemBundlerClient);
       setAccount(accounts[0]);
       setStatus({ type: 'success', message: `Connected to ${accounts[0]}` });
+      
+      // Set default delegation contract to MetaMask's EIP7702StatelessDeleGator
+      const environment = getDeleGatorEnvironment(sepolia.id);
+      setDelegationContract(environment.implementations.EIP7702StatelessDeleGatorImpl);
       
       // Listen for account changes
       window.ethereum.on('accountsChanged', (accounts) => {
@@ -44,6 +89,11 @@ const App = () => {
           setAccount(null);
           setProvider(null);
           setSigner(null);
+          setPublicClient(null);
+          setWalletClient(null);
+          setBundlerClient(null);
+          setSmartAccount(null);
+          setIsDelegated(false);
           setStatus({ type: 'warning', message: 'Wallet disconnected' });
         } else {
           setAccount(accounts[0]);
@@ -74,15 +124,25 @@ const App = () => {
       return;
     }
 
+    // Validate value
+    try {
+      parseEther(newTxValue || '0');
+    } catch (error) {
+      setStatus({ type: 'error', message: 'Invalid value format' });
+      return;
+    }
+
     const newTransaction = {
       id: Date.now(),
       address: newTxAddress,
-      calldata: newTxCalldata
+      calldata: newTxCalldata,
+      value: newTxValue || '0'
     };
 
     setBatchTransactions([...batchTransactions, newTransaction]);
     setNewTxAddress('');
     setNewTxCalldata('');
+    setNewTxValue('0');
     setStatus({ type: 'success', message: 'Transaction added to batch' });
   };
 
@@ -92,10 +152,10 @@ const App = () => {
     setStatus({ type: 'success', message: 'Transaction removed from batch' });
   };
 
-  // Send EIP-7702 transaction
-  const sendEIP7702Transaction = async () => {
-    if (!signer || !delegationContract || batchTransactions.length === 0) {
-      setStatus({ type: 'error', message: 'Please connect wallet, set delegation contract, and add batch transactions' });
+  // Create EIP-7702 delegation
+  const createDelegation = async () => {
+    if (!walletClient || !delegationContract) {
+      setStatus({ type: 'error', message: 'Please connect wallet and set delegation contract' });
       return;
     }
 
@@ -105,72 +165,42 @@ const App = () => {
     }
 
     setIsLoading(true);
-    setStatus({ type: 'warning', message: 'Preparing EIP-7702 transaction...' });
+    setStatus({ type: 'warning', message: 'Creating EIP-7702 delegation...' });
 
     try {
-      // Get the current nonce
-      const nonce = await provider.getTransactionCount(account);
-      
-      // Prepare the authorization for EIP-7702
-      const authorization = {
-        chainId: (await provider.getNetwork()).chainId,
-        address: delegationContract,
-        nonce: nonce
-      };
+      // Create authorization for delegation
+      const authorization = await walletClient.signAuthorization({
+        account: account,
+        contractAddress: delegationContract,
+        executor: "self",
+      });
 
-      // Sign the authorization
-      const authSignature = await signer.signMessage(
-        ethers.solidityPackedKeccak256(
-          ['uint256', 'address', 'uint256'],
-          [authorization.chainId, authorization.address, authorization.nonce]
-        )
-      );
+      // Send EIP-7702 transaction with authorization
+      const hash = await walletClient.sendTransaction({
+        authorizationList: [authorization],
+        data: "0x",
+        to: zeroAddress,
+      });
 
-      // Parse the signature
-      const sig = ethers.Signature.from(authSignature);
+      setStatus({ type: 'success', message: `Delegation created! Transaction hash: ${hash}` });
       
-      // Create the EIP-7702 transaction
-      const eip7702Transaction = {
-        type: 4, // EIP-7702 transaction type
-        to: account, // Self-delegation
-        value: 0,
-        data: '0x', // Empty data for delegation setup
-        gasLimit: 500000,
-        maxFeePerGas: ethers.parseUnits('20', 'gwei'),
-        maxPriorityFeePerGas: ethers.parseUnits('2', 'gwei'),
-        nonce: nonce,
-        authorizationList: [{
-          chainId: authorization.chainId,
-          address: authorization.address,
-          nonce: authorization.nonce,
-          v: sig.v,
-          r: sig.r,
-          s: sig.s
-        }]
-      };
-
-      setStatus({ type: 'warning', message: 'Sending delegation transaction...' });
+      // Wait for transaction confirmation
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
       
-      // Note: This is a simplified example. In practice, you would need to:
-      // 1. Use a proper EIP-7702 compatible wallet/provider
-      // 2. Handle the batch execution within the delegated contract
-      // 3. Ensure the delegation contract supports batch operations
-      
-      // For demonstration, we'll show how the transaction would be structured
-      console.log('EIP-7702 Transaction:', eip7702Transaction);
-      console.log('Batch Transactions:', batchTransactions);
-      
-      // This would be the actual transaction sending in a real implementation
-      // const txResponse = await signer.sendTransaction(eip7702Transaction);
-      // const receipt = await txResponse.wait();
-      
-      setStatus({ 
-        type: 'success', 
-        message: `EIP-7702 transaction prepared successfully! Check console for details. In a real implementation, this would execute ${batchTransactions.length} batched transactions.`
+      // Create smart account instance
+      const smartAccountInstance = await toMetaMaskSmartAccount({
+        client: publicClient,
+        implementation: Implementation.Stateless7702,
+        address: account,
+        signatory: { walletClient },
       });
       
+      setSmartAccount(smartAccountInstance);
+      setIsDelegated(true);
+      setStatus({ type: 'success', message: 'EOA successfully upgraded to smart account!' });
+      
     } catch (error) {
-      setStatus({ type: 'error', message: `Transaction failed: ${error.message}` });
+      setStatus({ type: 'error', message: `Delegation failed: ${error.message}` });
     } finally {
       setIsLoading(false);
     }
@@ -232,6 +262,13 @@ const App = () => {
           />
           <input
             type="text"
+            placeholder="Value in ETH (e.g., 0.1)"
+            value={newTxValue}
+            onChange={(e) => setNewTxValue(e.target.value)}
+            disabled={!account}
+          />
+          <input
+            type="text"
             placeholder="Calldata (0x...)"
             value={newTxCalldata}
             onChange={(e) => setNewTxCalldata(e.target.value)}
@@ -249,6 +286,7 @@ const App = () => {
               <div key={tx.id} className="batch-item">
                 <h4>Transaction #{tx.id}</h4>
                 <p><strong>Address:</strong> {tx.address}</p>
+                <p><strong>Value:</strong> {tx.value} ETH</p>
                 <p><strong>Calldata:</strong> {tx.calldata}</p>
                 <button 
                   onClick={() => removeBatchTransaction(tx.id)}
@@ -264,17 +302,42 @@ const App = () => {
 
       {/* Execute Transaction */}
       <div className="section">
-        <h3>Execute EIP-7702 Transaction</h3>
-        <button
-          onClick={sendEIP7702Transaction}
-          disabled={!account || !delegationContract || batchTransactions.length === 0 || isLoading}
-          style={{ backgroundColor: '#28a745', fontSize: '18px', padding: '15px 30px' }}
-        >
-          {isLoading ? 'Processing...' : 'Send EIP-7702 Transaction'}
-        </button>
-        <p style={{ fontSize: '12px', color: '#666' }}>
-          This will set the delegation contract as your account code and execute all batched transactions
-        </p>
+        <h3>EIP-7702 Operations</h3>
+        
+        {!isDelegated ? (
+          <div>
+            <button
+              onClick={createDelegation}
+              disabled={!account || !delegationContract || isLoading}
+              style={{ backgroundColor: '#007bff', fontSize: '16px', padding: '12px 24px' }}
+            >
+              {isLoading ? 'Creating Delegation...' : 'Create EIP-7702 Delegation'}
+            </button>
+            <p style={{ fontSize: '12px', color: '#666' }}>
+              This will upgrade your EOA to a smart account using EIP-7702
+            </p>
+          </div>
+        ) : (
+          <div>
+            <div style={{ marginBottom: '20px' }}>
+              <span style={{ color: '#28a745', fontWeight: 'bold' }}>✓ Smart Account Active</span>
+              <p style={{ fontSize: '12px', color: '#666' }}>
+                Your EOA has been upgraded to a smart account. You can now execute batch transactions.
+              </p>
+            </div>
+            
+            <button
+              onClick={executeBatchTransactions}
+              disabled={!smartAccount || batchTransactions.length === 0 || isLoading}
+              style={{ backgroundColor: '#28a745', fontSize: '18px', padding: '15px 30px' }}
+            >
+              {isLoading ? 'Executing Batch...' : 'Execute Batch Transactions'}
+            </button>
+            <p style={{ fontSize: '12px', color: '#666' }}>
+              Execute all batched transactions in a single user operation
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
