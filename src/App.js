@@ -1,346 +1,507 @@
 import React, { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
-import { createBundlerClient } from "viem/account-abstraction";
-import { 
-  createPublicClient, 
-  createWalletClient, 
-  http, 
-  parseEther,
-  zeroAddress 
-} from 'viem';
-import { sepolia } from 'viem/chains';
-import { custom } from 'viem';
-import {
-  Implementation,
-  toMetaMaskSmartAccount,
-  getDeleGatorEnvironment,
-} from '@metamask/delegation-toolkit';
 
-const App = () => {
-  const [account, setAccount] = useState(null);
+// Contract ABI for the delegation contract
+const contractABI = [
+  "function execute((address,uint256,bytes)[] calls) external payable",
+  "function execute((address,uint256,bytes)[] calls, bytes signature) external payable",
+  "function nonce() external view returns (uint256)"
+];
+
+// ERC20 ABI for token transfers
+const erc20ABI = [
+  "function transfer(address to, uint256 amount) external returns (bool)",
+  "function balanceOf(address owner) view returns (uint256)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)"
+];
+
+function App() {
   const [provider, setProvider] = useState(null);
   const [signer, setSigner] = useState(null);
-  const [publicClient, setPublicClient] = useState(null);
-  const [walletClient, setWalletClient] = useState(null);
-  const [bundlerClient, setBundlerClient] = useState(null);
-  const [smartAccount, setSmartAccount] = useState(null);
-  const [delegationContract, setDelegationContract] = useState('');
+  const [account, setAccount] = useState('');
+  const [balance, setBalance] = useState('');
+  const [delegationContract, setDelegationContract] = useState('0x69e2C6013Bd8adFd9a54D7E0528b740bac4Eb87C'); // Default from QuickNode guide
   const [batchTransactions, setBatchTransactions] = useState([]);
-  const [newTxAddress, setNewTxAddress] = useState('');
-  const [newTxCalldata, setNewTxCalldata] = useState('');
-  const [newTxValue, setNewTxValue] = useState('0');
-  const [status, setStatus] = useState({ type: '', message: '' });
+  const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [isDelegated, setIsDelegated] = useState(false);
+  const [delegationStatus, setDelegationStatus] = useState(null);
+  const [logs, setLogs] = useState([]);
 
-  // Check if MetaMask is installed
-  const isMetaMaskInstalled = () => {
-    return typeof window.ethereum !== 'undefined';
+  // Add log function
+  const addLog = (message, type = 'info') => {
+    const timestamp = new Date().toLocaleTimeString();
+    setLogs(prev => [...prev, { message, type, timestamp }]);
+    console.log(`[${timestamp}] ${message}`);
   };
 
   // Connect to MetaMask
   const connectWallet = async () => {
-    if (!isMetaMaskInstalled()) {
-      setStatus({ type: 'error', message: 'MetaMask is not installed!' });
-      return;
-    }
-
     try {
-      // Request account access
-      const accounts = await window.ethereum.request({ 
-        method: 'eth_requestAccounts' 
-      });
-      
-      const web3Provider = new ethers.BrowserProvider(window.ethereum);
-      const web3Signer = await web3Provider.getSigner();
-      
-      // Set up Viem clients
-      const viemPublicClient = createPublicClient({
-        chain: sepolia,
-        transport: http(),
-      });
+      if (!window.ethereum) {
+        addLog('MetaMask not detected', 'error');
+        return;
+      }
 
-      const viemWalletClient = createWalletClient({
-        chain: sepolia,
-        transport: custom(window.ethereum),
-      });
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      const address = await signer.getAddress();
+      const balance = await provider.getBalance(address);
 
-      // Set up bundler client (you'll need to replace with your bundler URL)
-      const viemBundlerClient = createBundlerClient({
-        client: viemPublicClient,
-        transport: http("https://sepolia.bundler.example.com"), // Replace with actual bundler
-      });
-      
-      setProvider(web3Provider);
-      setSigner(web3Signer);
-      setPublicClient(viemPublicClient);
-      setWalletClient(viemWalletClient);
-      setBundlerClient(viemBundlerClient);
-      setAccount(accounts[0]);
-      setStatus({ type: 'success', message: `Connected to ${accounts[0]}` });
-      
-      // Set default delegation contract to MetaMask's EIP7702StatelessDeleGator
-      const environment = getDeleGatorEnvironment(sepolia.id);
-      setDelegationContract(environment.implementations.EIP7702StatelessDeleGatorImpl);
-      
-      // Listen for account changes
-      window.ethereum.on('accountsChanged', (accounts) => {
-        if (accounts.length === 0) {
-          setAccount(null);
-          setProvider(null);
-          setSigner(null);
-          setPublicClient(null);
-          setWalletClient(null);
-          setBundlerClient(null);
-          setSmartAccount(null);
-          setIsDelegated(false);
-          setStatus({ type: 'warning', message: 'Wallet disconnected' });
-        } else {
-          setAccount(accounts[0]);
-          setStatus({ type: 'success', message: `Connected to ${accounts[0]}` });
-        }
-      });
-      
+      setProvider(provider);
+      setSigner(signer);
+      setAccount(address);
+      setBalance(ethers.formatEther(balance));
+      setIsConnected(true);
+
+      addLog(`Connected to ${address}`, 'success');
+      addLog(`Balance: ${ethers.formatEther(balance)} ETH`, 'info');
+
+      // Check delegation status
+      await checkDelegationStatus(address, provider);
     } catch (error) {
-      setStatus({ type: 'error', message: `Failed to connect: ${error.message}` });
+      addLog(`Connection failed: ${error.message}`, 'error');
     }
   };
 
-  // Add a new batch transaction
+  // Check delegation status
+  const checkDelegationStatus = async (address = account, providerToUse = provider) => {
+    try {
+      const code = await providerToUse.getCode(address);
+      
+      if (code === "0x") {
+        setDelegationStatus(null);
+        addLog(`No delegation found for ${address}`, 'info');
+        return null;
+      }
+
+      // Check if it's an EIP-7702 delegation (starts with 0xef0100)
+      if (code.startsWith("0xef0100")) {
+        const delegatedAddress = "0x" + code.slice(8);
+        setDelegationStatus(delegatedAddress);
+        addLog(`✅ Delegation found: ${delegatedAddress}`, 'success');
+        return delegatedAddress;
+      } else {
+        setDelegationStatus(null);
+        addLog(`Address has code but not EIP-7702 delegation`, 'warning');
+        return null;
+      }
+    } catch (error) {
+      addLog(`Error checking delegation: ${error.message}`, 'error');
+      return null;
+    }
+  };
+
+  // Add batch transaction
   const addBatchTransaction = () => {
-    if (!newTxAddress || !newTxCalldata) {
-      setStatus({ type: 'error', message: 'Please provide both address and calldata' });
-      return;
-    }
+    setBatchTransactions([
+      ...batchTransactions,
+      { to: '', value: '0', data: '0x' }
+    ]);
+  };
 
-    // Basic validation
-    if (!ethers.isAddress(newTxAddress)) {
-      setStatus({ type: 'error', message: 'Invalid address format' });
-      return;
-    }
+  // Update batch transaction
+  const updateBatchTransaction = (index, field, value) => {
+    const updated = [...batchTransactions];
+    updated[index][field] = value;
+    setBatchTransactions(updated);
+  };
 
-    if (!newTxCalldata.startsWith('0x')) {
-      setStatus({ type: 'error', message: 'Calldata must start with 0x' });
-      return;
-    }
+  // Remove batch transaction
+  const removeBatchTransaction = (index) => {
+    setBatchTransactions(batchTransactions.filter((_, i) => i !== index));
+  };
 
-    // Validate value
+  // Create authorization for EIP-7702
+  const createAuthorization = async (nonce) => {
     try {
-      parseEther(newTxValue || '0');
+      addLog(`Creating authorization with nonce: ${nonce}`, 'info');
+      
+      const chainId = await provider.getNetwork().then(n => n.chainId);
+      
+      // Create the authorization message
+      const authMessage = {
+        chainId: chainId,
+        address: delegationContract,
+        nonce: nonce
+      };
+
+      // Sign the authorization using MetaMask's eth_signTypedData_v4
+      const domain = {
+        name: 'EIP7702',
+        version: '1',
+        chainId: chainId
+      };
+
+      const types = {
+        Authorization: [
+          { name: 'chainId', type: 'uint256' },
+          { name: 'address', type: 'address' },
+          { name: 'nonce', type: 'uint256' }
+        ]
+      };
+
+      // Use MetaMask's signTypedData for authorization
+      const signature = await signer.signTypedData(domain, types, authMessage);
+      
+      // Parse the signature
+      const sig = ethers.Signature.from(signature);
+      
+      const authorization = {
+        chainId: chainId,
+        address: delegationContract,
+        nonce: nonce,
+        yParity: sig.yParity,
+        r: sig.r,
+        s: sig.s
+      };
+
+      addLog('Authorization created successfully', 'success');
+      return authorization;
     } catch (error) {
-      setStatus({ type: 'error', message: 'Invalid value format' });
+      addLog(`Failed to create authorization: ${error.message}`, 'error');
+      throw error;
+    }
+  };
+
+  // Send EIP-7702 transaction
+  const sendEIP7702Transaction = async () => {
+    if (!signer || !provider) {
+      addLog('Please connect wallet first', 'error');
       return;
     }
 
-    const newTransaction = {
-      id: Date.now(),
-      address: newTxAddress,
-      calldata: newTxCalldata,
-      value: newTxValue || '0'
-    };
-
-    setBatchTransactions([...batchTransactions, newTransaction]);
-    setNewTxAddress('');
-    setNewTxCalldata('');
-    setNewTxValue('0');
-    setStatus({ type: 'success', message: 'Transaction added to batch' });
-  };
-
-  // Remove a batch transaction
-  const removeBatchTransaction = (id) => {
-    setBatchTransactions(batchTransactions.filter(tx => tx.id !== id));
-    setStatus({ type: 'success', message: 'Transaction removed from batch' });
-  };
-
-  // Create EIP-7702 delegation
-  const createDelegation = async () => {
-    if (!walletClient || !delegationContract) {
-      setStatus({ type: 'error', message: 'Please connect wallet and set delegation contract' });
-      return;
-    }
-
-    if (!ethers.isAddress(delegationContract)) {
-      setStatus({ type: 'error', message: 'Invalid delegation contract address' });
+    if (batchTransactions.length === 0) {
+      addLog('Please add at least one transaction', 'error');
       return;
     }
 
     setIsLoading(true);
-    setStatus({ type: 'warning', message: 'Creating EIP-7702 delegation...' });
-
+    
     try {
-      // Create authorization for delegation
-      const authorization = await walletClient.signAuthorization({
-        account: account,
-        contractAddress: delegationContract,
-        executor: "self",
+      // Get current nonce
+      const currentNonce = await signer.getNonce();
+      addLog(`Current nonce: ${currentNonce}`, 'info');
+
+      // Create authorization with incremented nonce
+      const auth = await createAuthorization(currentNonce + 1);
+
+      // Prepare calls array
+      const calls = batchTransactions.map(tx => [
+        tx.to || ethers.ZeroAddress,
+        ethers.parseEther(tx.value || '0'),
+        tx.data || '0x'
+      ]);
+
+      addLog(`Preparing ${calls.length} batch transactions`, 'info');
+
+      // Create contract instance pointing to the signer's address (not the delegation contract)
+      const delegatedContract = new ethers.Contract(
+        account,
+        contractABI,
+        signer
+      );
+
+      // Send the EIP-7702 transaction
+      const tx = await delegatedContract["execute((address,uint256,bytes)[])"](calls, {
+        type: 4, // EIP-7702 transaction type
+        authorizationList: [auth]
       });
 
-      // Send EIP-7702 transaction with authorization
-      const hash = await walletClient.sendTransaction({
-        authorizationList: [authorization],
-        data: "0x",
-        to: zeroAddress,
-      });
+      addLog(`Transaction sent: ${tx.hash}`, 'success');
+      addLog('Waiting for confirmation...', 'info');
 
-      setStatus({ type: 'success', message: `Delegation created! Transaction hash: ${hash}` });
-      
-      // Wait for transaction confirmation
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-      
-      // Create smart account instance
-      const smartAccountInstance = await toMetaMaskSmartAccount({
-        client: publicClient,
-        implementation: Implementation.Stateless7702,
-        address: account,
-        signatory: { walletClient },
-      });
-      
-      setSmartAccount(smartAccountInstance);
-      setIsDelegated(true);
-      setStatus({ type: 'success', message: 'EOA successfully upgraded to smart account!' });
-      
+      const receipt = await tx.wait();
+      addLog(`Transaction confirmed in block ${receipt.blockNumber}`, 'success');
+
+      // Check delegation status after transaction
+      await checkDelegationStatus();
+
+      // Update balance
+      const newBalance = await provider.getBalance(account);
+      setBalance(ethers.formatEther(newBalance));
+
     } catch (error) {
-      setStatus({ type: 'error', message: `Delegation failed: ${error.message}` });
+      addLog(`Transaction failed: ${error.message}`, 'error');
+      console.error('Full error:', error);
     } finally {
       setIsLoading(false);
     }
   };
 
-  return (
-    <div className="container">
-      <h1>EIP-7702 dApp</h1>
+  // Send sponsored transaction (if already delegated)
+  const sendSponsoredTransaction = async () => {
+    if (!signer || !provider) {
+      addLog('Please connect wallet first', 'error');
+      return;
+    }
+
+    if (!delegationStatus) {
+      addLog('Account must be delegated first', 'error');
+      return;
+    }
+
+    setIsLoading(true);
+    
+    try {
+      // Create contract instance
+      const delegatedContract = new ethers.Contract(
+        account,
+        contractABI,
+        signer
+      );
+
+      // Get contract nonce
+      const contractNonce = await delegatedContract.nonce();
+      addLog(`Contract nonce: ${contractNonce}`, 'info');
+
+      // Prepare calls
+      const calls = batchTransactions.map(tx => [
+        tx.to || ethers.ZeroAddress,
+        ethers.parseEther(tx.value || '0'),
+        tx.data || '0x'
+      ]);
+
+      // Create signature for sponsored transaction
+      const signature = await createSignatureForCalls(calls, contractNonce);
+
+      // Send sponsored transaction
+      const tx = await delegatedContract["execute((address,uint256,bytes)[],bytes)"](
+        calls, 
+        signature
+      );
+
+      addLog(`Sponsored transaction sent: ${tx.hash}`, 'success');
+      const receipt = await tx.wait();
+      addLog(`Sponsored transaction confirmed in block ${receipt.blockNumber}`, 'success');
+
+    } catch (error) {
+      addLog(`Sponsored transaction failed: ${error.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Create signature for sponsored calls
+  const createSignatureForCalls = async (calls, contractNonce) => {
+    // Encode the calls for signature
+    let encodedCalls = "0x";
+    for (const call of calls) {
+      const [to, value, data] = call;
+      encodedCalls += ethers.solidityPacked(
+        ["address", "uint256", "bytes"], 
+        [to, value, data]
+      ).slice(2);
+    }
+
+    // Create the digest
+    const digest = ethers.keccak256(
+      ethers.solidityPacked(
+        ["uint256", "bytes"], 
+        [contractNonce, encodedCalls]
+      )
+    );
+
+    // Sign the digest
+    return await signer.signMessage(ethers.getBytes(digest));
+  };
+
+  // Revoke delegation
+  const revokeDelegation = async () => {
+    if (!signer || !provider) {
+      addLog('Please connect wallet first', 'error');
+      return;
+    }
+
+    setIsLoading(true);
+    
+    try {
+      const currentNonce = await signer.getNonce();
       
-      {status.message && (
-        <div className={`status ${status.type}`}>
-          {status.message}
-        </div>
-      )}
+      // Create revocation authorization (zero address)
+      const revokeAuth = await createAuthorization(currentNonce + 1);
+      revokeAuth.address = ethers.ZeroAddress; // Set to zero address to revoke
 
-      {/* Wallet Connection */}
-      <div className="section">
-        <h3>Wallet Connection</h3>
-        {account ? (
-          <div>
-            <p>Connected: {account}</p>
-            <button className="connected" disabled>
-              ✓ Connected
-            </button>
-          </div>
-        ) : (
-          <button onClick={connectWallet}>
-            Connect MetaMask
-          </button>
-        )}
-      </div>
+      // Send revocation transaction
+      const tx = await signer.sendTransaction({
+        type: 4,
+        to: account,
+        authorizationList: [revokeAuth]
+      });
 
-      {/* Delegation Contract */}
-      <div className="section">
-        <h3>Delegation Contract</h3>
-        <input
-          type="text"
-          placeholder="Enter delegation contract address (0x...)"
-          value={delegationContract}
-          onChange={(e) => setDelegationContract(e.target.value)}
-          disabled={!account}
-        />
-        <p style={{ fontSize: '12px', color: '#666' }}>
-          This contract will be set as the code for your account via EIP-7702
-        </p>
-      </div>
+      addLog(`Revocation transaction sent: ${tx.hash}`, 'success');
+      const receipt = await tx.wait();
+      addLog('Delegation revoked successfully!', 'success');
 
-      {/* Batch Transactions */}
-      <div className="section">
-        <h3>Batch Transactions</h3>
+      // Check delegation status
+      await checkDelegationStatus();
+
+    } catch (error) {
+      addLog(`Revocation failed: ${error.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Clear logs
+  const clearLogs = () => {
+    setLogs([]);
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-100 p-4">
+      <div className="max-w-4xl mx-auto">
+        <h1 className="text-3xl font-bold text-center mb-8">EIP-7702 Batch Transaction dApp</h1>
         
-        <div style={{ marginBottom: '20px' }}>
+        {/* Connection Status */}
+        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+          <h2 className="text-xl font-semibold mb-4">Wallet Connection</h2>
+          {!isConnected ? (
+            <button
+              onClick={connectWallet}
+              className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+            >
+              Connect MetaMask
+            </button>
+          ) : (
+            <div>
+              <p><strong>Account:</strong> {account}</p>
+              <p><strong>Balance:</strong> {balance} ETH</p>
+              <p><strong>Delegation Status:</strong> {delegationStatus ? `✅ Delegated to ${delegationStatus}` : '❌ Not delegated'}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Delegation Contract */}
+        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+          <h2 className="text-xl font-semibold mb-4">Delegation Contract</h2>
           <input
             type="text"
-            placeholder="Transaction address (0x...)"
-            value={newTxAddress}
-            onChange={(e) => setNewTxAddress(e.target.value)}
-            disabled={!account}
+            value={delegationContract}
+            onChange={(e) => setDelegationContract(e.target.value)}
+            placeholder="Delegation contract address"
+            className="w-full p-2 border border-gray-300 rounded mb-4"
           />
-          <input
-            type="text"
-            placeholder="Value in ETH (e.g., 0.1)"
-            value={newTxValue}
-            onChange={(e) => setNewTxValue(e.target.value)}
-            disabled={!account}
-          />
-          <input
-            type="text"
-            placeholder="Calldata (0x...)"
-            value={newTxCalldata}
-            onChange={(e) => setNewTxCalldata(e.target.value)}
-            disabled={!account}
-          />
-          <button onClick={addBatchTransaction} disabled={!account}>
+          <button
+            onClick={() => checkDelegationStatus()}
+            disabled={!isConnected}
+            className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 disabled:bg-gray-300"
+          >
+            Check Delegation Status
+          </button>
+        </div>
+
+        {/* Batch Transactions */}
+        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+          <h2 className="text-xl font-semibold mb-4">Batch Transactions</h2>
+          
+          {batchTransactions.map((tx, index) => (
+            <div key={index} className="border border-gray-200 p-4 rounded mb-4">
+              <h3 className="font-medium mb-2">Transaction {index + 1}</h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <input
+                  type="text"
+                  value={tx.to}
+                  onChange={(e) => updateBatchTransaction(index, 'to', e.target.value)}
+                  placeholder="To address"
+                  className="p-2 border border-gray-300 rounded"
+                />
+                <input
+                  type="text"
+                  value={tx.value}
+                  onChange={(e) => updateBatchTransaction(index, 'value', e.target.value)}
+                  placeholder="Value in ETH"
+                  className="p-2 border border-gray-300 rounded"
+                />
+                <input
+                  type="text"
+                  value={tx.data}
+                  onChange={(e) => updateBatchTransaction(index, 'data', e.target.value)}
+                  placeholder="Call data (0x)"
+                  className="p-2 border border-gray-300 rounded"
+                />
+              </div>
+              <button
+                onClick={() => removeBatchTransaction(index)}
+                className="bg-red-500 text-white px-2 py-1 rounded text-sm mt-2 hover:bg-red-600"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+
+          <button
+            onClick={addBatchTransaction}
+            className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 mb-4"
+          >
             Add Transaction
           </button>
         </div>
 
-        {batchTransactions.length > 0 && (
-          <div>
-            <h4>Batched Transactions ({batchTransactions.length}):</h4>
-            {batchTransactions.map((tx) => (
-              <div key={tx.id} className="batch-item">
-                <h4>Transaction #{tx.id}</h4>
-                <p><strong>Address:</strong> {tx.address}</p>
-                <p><strong>Value:</strong> {tx.value} ETH</p>
-                <p><strong>Calldata:</strong> {tx.calldata}</p>
-                <button 
-                  onClick={() => removeBatchTransaction(tx.id)}
-                  style={{ backgroundColor: '#dc3545' }}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Execute Transaction */}
-      <div className="section">
-        <h3>EIP-7702 Operations</h3>
-        
-        {!isDelegated ? (
-          <div>
+        {/* Actions */}
+        <div className="bg-white p-6 rounded-lg shadow-md mb-6">
+          <h2 className="text-xl font-semibold mb-4">Actions</h2>
+          <div className="flex flex-wrap gap-4">
             <button
-              onClick={createDelegation}
-              disabled={!account || !delegationContract || isLoading}
-              style={{ backgroundColor: '#007bff', fontSize: '16px', padding: '12px 24px' }}
+              onClick={sendEIP7702Transaction}
+              disabled={!isConnected || isLoading || batchTransactions.length === 0}
+              className="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 disabled:bg-gray-300"
             >
-              {isLoading ? 'Creating Delegation...' : 'Create EIP-7702 Delegation'}
+              {isLoading ? 'Processing...' : 'Send EIP-7702 Transaction'}
             </button>
-            <p style={{ fontSize: '12px', color: '#666' }}>
-              This will upgrade your EOA to a smart account using EIP-7702
-            </p>
-          </div>
-        ) : (
-          <div>
-            <div style={{ marginBottom: '20px' }}>
-              <span style={{ color: '#28a745', fontWeight: 'bold' }}>✓ Smart Account Active</span>
-              <p style={{ fontSize: '12px', color: '#666' }}>
-                Your EOA has been upgraded to a smart account. You can now execute batch transactions.
-              </p>
-            </div>
             
             <button
-              onClick={executeBatchTransactions}
-              disabled={!smartAccount || batchTransactions.length === 0 || isLoading}
-              style={{ backgroundColor: '#28a745', fontSize: '18px', padding: '15px 30px' }}
+              onClick={sendSponsoredTransaction}
+              disabled={!isConnected || isLoading || !delegationStatus || batchTransactions.length === 0}
+              className="bg-yellow-500 text-white px-4 py-2 rounded hover:bg-yellow-600 disabled:bg-gray-300"
             >
-              {isLoading ? 'Executing Batch...' : 'Execute Batch Transactions'}
+              Send Sponsored Transaction
             </button>
-            <p style={{ fontSize: '12px', color: '#666' }}>
-              Execute all batched transactions in a single user operation
-            </p>
+            
+            <button
+              onClick={revokeDelegation}
+              disabled={!isConnected || isLoading || !delegationStatus}
+              className="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 disabled:bg-gray-300"
+            >
+              Revoke Delegation
+            </button>
           </div>
-        )}
+        </div>
+
+        {/* Logs */}
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold">Transaction Logs</h2>
+            <button
+              onClick={clearLogs}
+              className="bg-gray-500 text-white px-3 py-1 rounded text-sm hover:bg-gray-600"
+            >
+              Clear Logs
+            </button>
+          </div>
+          <div className="max-h-96 overflow-y-auto">
+            {logs.length === 0 ? (
+              <p className="text-gray-500">No logs yet...</p>
+            ) : (
+              logs.map((log, index) => (
+                <div
+                  key={index}
+                  className={`p-2 mb-2 rounded text-sm ${
+                    log.type === 'error' ? 'bg-red-100 text-red-800' :
+                    log.type === 'success' ? 'bg-green-100 text-green-800' :
+                    log.type === 'warning' ? 'bg-yellow-100 text-yellow-800' :
+                    'bg-gray-100 text-gray-800'
+                  }`}
+                >
+                  <span className="font-mono text-xs text-gray-500">[{log.timestamp}]</span> {log.message}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
-};
+}
 
 export default App;
